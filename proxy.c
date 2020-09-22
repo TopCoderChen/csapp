@@ -17,11 +17,14 @@ void parse_uri(char *uri, char *hostname, char *path, int *port);
 void clienterror(int fd, char *cause, char *errnum,
                  char *shortmsg, char *longmsg);
 void write_request_headers(char *newreq, char *host, char *port);
-
+void *thread_routine(void *vargp);
 
 int main(int argc, char **argv)
 {
-    int listenfd, connfd;
+    pthread_t tid;
+
+    int listenfd;
+    int*  connfd;
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
@@ -41,17 +44,30 @@ int main(int argc, char **argv)
     {
         printf("Proxy server is listening !!!\n");
 
+        connfd = Malloc(sizeof(int));
         clientlen = sizeof(clientaddr);
-        connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:tiny:accept
+        *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:tiny:accept
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
                     port, MAXLINE, 0);
         printf("Accepted connection from (%s, %s)\n", hostname, port);
-        doit(connfd);                                             //line:netp:tiny:doit
-        Close(connfd);                                            //line:netp:tiny:close
+        Pthread_create(&tid, NULL, thread_routine, connfd);                                               //line:netp:tiny:doit                                          //line:netp:tiny:close
     }
+
+    Close(listenfd);
+    return 0;
 }
 
-
+void *thread_routine(void *vargp)
+{
+    int connfd = *((int *)vargp);
+    // Detach mode.
+    Pthread_detach(pthread_self());
+    // Free the heap malloc.
+    Free(vargp);
+    doit(connfd);
+    Close(connfd);
+    return NULL;
+}
 
 /*
  * Handler: one HTTP request/response transaction
@@ -116,11 +132,12 @@ void doit(int client_fd)
     // Read response from dest-server and relay back to client socket.
     int n = 0;
     while ((n = Rio_readlineb(&to_endserver, buf, MAXLINE)))
-    {	
+    {
         //printf("proxy received %d bytes,then send\n",n);
         Rio_writen(client_fd, buf, n);  //real server response to real client
     }
     printf("Proxy server forwarded response back to client !!!\n");
+    Close(endserver_fd);
 }
 
 // Extract hostname/port/path from URI.
@@ -196,15 +213,15 @@ void populate_request_headers(rio_t *rp, char *newreq, char *hostname, char *por
 }
 
 // Populate HTTP headers.
-void write_request_headers(char *newreq, char *host, char *port) 
+void write_request_headers(char *newreq, char *host, char *port)
 {
-	if (strlen(port) > 0)
+    if (strlen(port) > 0)
     {
         sprintf(newreq, "%sHost: %s:%s\r\n", newreq, host, port);
     }
     else
     {
-        sprintf(newreq, "%sHost: %s\r\n",newreq, host);
+        sprintf(newreq, "%sHost: %s\r\n", newreq, host);
     }
     sprintf(newreq, "%s%s", newreq, user_agent);
     sprintf(newreq, "%s%s", newreq, connection);
