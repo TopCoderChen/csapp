@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "csapp.h"
+#include "cache.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
@@ -8,11 +9,10 @@
 #define DEFAULT_PORT 80
 
 static const char *user_agent = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
-static const char *connection = "Cnnection: close\r\n";
+static const char *connection = "Connection: close\r\n";
 static const char *proxy_connection = "Proxy-connection: close\r\n";
 
 void doit(int client_fd);
-void populate_request_headers(rio_t *rp, char *newreq, char *hostname, char *port);
 void parse_uri(char *uri, char *hostname, char *path, int *port);
 void clienterror(int fd, char *cause, char *errnum,
                  char *shortmsg, char *longmsg);
@@ -24,7 +24,7 @@ int main(int argc, char **argv)
     pthread_t tid;
 
     int listenfd;
-    int*  connfd;
+    int  *connfd;
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
@@ -38,6 +38,8 @@ int main(int argc, char **argv)
 
     // Ignore SIGPIPE.
     signal(SIGPIPE, SIG_IGN);
+
+    init_cache();
 
     listenfd = Open_listenfd(argv[1]);
     while (1)
@@ -54,6 +56,9 @@ int main(int argc, char **argv)
     }
 
     Close(listenfd);
+
+    free_cache();
+
     return 0;
 }
 
@@ -100,6 +105,15 @@ void doit(int client_fd)
         return;
     }
 
+    // printf("Reading cache for %s\n", uri);
+
+    // If cache hit & write to socket, return.
+    if (read_cache(uri, client_fd))
+    {
+    	printf("\n\n !!! \n\n Read cache successful for %s\n", uri);
+        return;
+    }
+
     // Extract hostname/port/path from URI.
     parse_uri(uri, hostname, path, &port);
     char port_str[10];
@@ -126,21 +140,34 @@ void doit(int client_fd)
     write_request_headers(newreq, hostname, port_str);
 
     // Relay request to dest server.
-    printf("Proxy server forwarding request to dest server !!!\n");
+    // printf("Proxy server forwarding request to dest server !!!\n");
     Rio_writen(endserver_fd, newreq, strlen(newreq));
 
     // Read response from dest-server and relay back to client socket.
     int n = 0;
+    int data_len = 0;  // size of data being recevied from end server.
+    char data[MAX_OBJECT_SIZE];
     while ((n = Rio_readlineb(&to_endserver, buf, MAXLINE)))
     {
+        if (data_len <= MAX_OBJECT_SIZE)
+        {
+            memcpy(data + data_len, buf, n);
+            data_len += n;
+        }
         //printf("proxy received %d bytes,then send\n",n);
         Rio_writen(client_fd, buf, n);  //real server response to real client
     }
-    printf("Proxy server forwarded response back to client !!!\n");
+
+    if (data_len <= MAX_OBJECT_SIZE)
+    {
+        write_cache(uri, data, data_len);
+        printf("\n\n ! \n\n Wrote cache done for %s\n", uri);
+    }
+    // printf("Proxy server forwarded response back to client !!!\n");
     Close(endserver_fd);
 }
 
-// Extract hostname/port/path from URI.
+// Extract hostname/port/path from URI (helper).
 void parse_uri(char *uri, char *hostname, char *path, int *port)
 {
     *port = 80;
@@ -180,39 +207,7 @@ void parse_uri(char *uri, char *hostname, char *path, int *port)
 
 }
 
-// sprintf() is mainly for appending to str.
-void populate_request_headers(rio_t *rp, char *newreq, char *hostname, char *port)
-{
-    //already have sprintf(newreq, "GET %s HTTP/1.0\r\n", path);
-    char buf[MAXLINE];
-
-    while(Rio_readlineb(rp, buf, MAXLINE) > 0)
-    {
-        if (!strcmp(buf, "\r\n"))
-        {
-            break;
-        }
-        if (strstr(buf, "Host:") != NULL) continue;
-        if (strstr(buf, "User-Agent:") != NULL) continue;
-        if (strstr(buf, "Connection:") != NULL) continue;
-        if (strstr(buf, "Proxy-Connection:") != NULL) continue;
-
-        sprintf(newreq, "%s%s", newreq, buf);
-    }
-    if (strlen(port) > 0)
-    {
-        sprintf(newreq, "%sHost: %s:%s\r\n", newreq, hostname, port);
-    }
-    else
-    {
-        sprintf(newreq, "%sHost: %s\r\n", newreq, hostname);
-    }
-
-    // sprintf(newreq, "%s%s%s%s", newreq, user_agent_hdr, conn_hdr, prox_hdr);
-    sprintf(newreq, "%s\r\n", newreq);
-}
-
-// Populate HTTP headers.
+// Populate HTTP headers (helper).
 void write_request_headers(char *newreq, char *host, char *port)
 {
     if (strlen(port) > 0)
